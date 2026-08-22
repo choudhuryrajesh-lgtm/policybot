@@ -1,7 +1,12 @@
 # 05 — Domain Model
 
 ## Status
-Draft v0.1 — 2026-08-17
+Draft v0.3 — 2026-08-21 (v0.2 added §3.1 social-layer tables; explicitly
+does **not** add an Employee/Org entity to PolicyBot's own stores — that
+data is read live via MCP tools. v0.3 resolves the open questions this
+raised: Cognito confirmed as ACL source of truth, feed visibility
+confirmed org-wide, and notes the Placeholder People-Data Service's own
+separate mock schema)
 
 Traces from: [04-architecture.md](04-architecture.md)
 
@@ -22,6 +27,15 @@ Document ──1:N──▶ DocumentVersion ──1:N──▶ Chunk ──1:1�
 Document ──1:N──▶ AccessControlTag
 IngestionJob ──N:1──▶ DocumentVersion
 AuditLogEntry (references User, Document, or Session as subject)
+
+  -- new, v0.2 --
+User (Cognito) ──1:1──▶ Profile
+User (Cognito) ──1:N──▶ Post ──1:N──▶ Comment
+User (Cognito) ──N:N──▶ User (Follows)
+User (Cognito) ──1:N──▶ DirectMessage (via DMThread)
+Employee/Org data is NOT a local entity — resolved live per-request via
+  the MCP Tool Layer against the Placeholder People-Data Service (v1) —
+  see §3.1
 ```
 
 ## 2. Postgres / pgvector Schema
@@ -135,6 +149,118 @@ so the retrieval-time access-tag lookup doesn't need a scan.
 Immutable by convention (no update/delete API exposed) — satisfies
 NFR-033.
 
+## 3.1 Social Layer Tables (new, v0.2)
+
+**No `Employee`/`Org` entity is defined in PolicyBot's own data stores,
+deliberately.** Role, manager, department, org hierarchy, training,
+certifications, performance/360 review, salary/compensation, and (mocked)
+family/dependent data are all read live via the MCP Tool Layer
+([04-architecture.md](04-architecture.md) §2.10) from the Placeholder
+People-Data Service (§2.12) — storing a local copy in Postgres/DynamoDB
+would recreate exactly the staleness problem G6 exists to avoid, and
+would still be true once a real HRIS eventually replaces the placeholder.
+The tables below hold only data **native** to PolicyBot (no external
+system of record for it).
+
+**Resolved v0.3** ([00-vision-and-scope.md](00-vision-and-scope.md) §8
+Q7): the Placeholder People-Data Service has its own minimal schema,
+separate from everything in this document — it's a different service's
+data, not PolicyBot's. Recorded here only for reference since nothing
+else documents it: a single `EmployeeRecord` shape (`employee_id`,
+`name`, `role`, `manager_id`, `department`, `org_path`, `training[]`,
+`certifications[]`, `reviews[]` (360/performance entries), `salary`
+(current + hike history), `family_members[]` (mocked, synthetic only —
+see NFR-095)) seeded as static/synthetic data, e.g. a single table in
+whatever lightweight store §2.12 uses. This is intentionally not
+normalized or indexed to the rigor of `documents_chunks` or the
+DynamoDB tables below — it exists to be replaced by a real HRIS schema
+later, not to be a long-lived part of this domain model.
+
+### `Profiles`
+| Attribute | Type | Notes |
+|---|---|---|
+| `PK` = `USER#{user_id}` | S | |
+| `SK` = `PROFILE` | S | singleton item per user |
+| `bio` | S | user-editable, native to this system |
+| `avatar_uri` | S | S3 location |
+| `contact_prefs` | M | user-editable |
+| `updated_at` | S | |
+
+Role/manager/department are intentionally **not** attributes here —
+always fetched live via the MCP Tool Layer when a profile is rendered
+(FR-120), so a profile view can never show stale org data.
+
+### `Posts`
+| Attribute | Type | Notes |
+|---|---|---|
+| `PK` = `USER#{author_id}` | S | author's posts, for "view my posts" |
+| `SK` = `POST#{ISO8601_timestamp}#{post_id}` | S | |
+| `content` | S | |
+| `visibility` | S | `org` (confirmed v0.3 default, FR-126) — narrower scoping (department/follow-based) is additive if adopted later |
+| `comment_count` | N | denormalized counter |
+| `created_at` | S | |
+
+### `Comments`
+| Attribute | Type | Notes |
+|---|---|---|
+| `PK` = `POST#{post_id}` | S | |
+| `SK` = `COMMENT#{ISO8601_timestamp}#{comment_id}` | S | |
+| `author_id` | S | |
+| `content` | S | |
+
+### `Follows`
+| Attribute | Type | Notes |
+|---|---|---|
+| `PK` = `USER#{follower_id}` | S | |
+| `SK` = `FOLLOWS#{followed_user_id}` | S | supports "who do I follow" |
+| `created_at` | S | |
+
+A GSI (`GSI1PK = USER#{followed_user_id}`, `GSI1SK = FOLLOWER#{follower_id}`)
+supports the reverse "who follows me" query without a table scan.
+
+### `Feed`
+| Attribute | Type | Notes |
+|---|---|---|
+| `PK` = `USER#{viewer_id}` | S | the *viewer's* feed, not the author's |
+| `SK` = `FEED#{ISO8601_timestamp}#{post_id}` | S | |
+| `author_id` | S | |
+| `post_id` | S | pointer back to `Posts` — feed items are pointers, not copies, so an edit/delete on the source post doesn't require updating every fanned-out copy |
+
+Populated by a DynamoDB Streams trigger on `Posts` inserts, which fans a
+new post out to every follower's `Feed` partition (per
+[04-architecture.md](04-architecture.md) §2.11) — eventually consistent
+by design.
+
+### `DirectMessages`
+| Attribute | Type | Notes |
+|---|---|---|
+| `PK` = `DM#{thread_id}` | S | `thread_id` = sorted, joined pair of the two user ids, so both participants derive the same key |
+| `SK` = `MSG#{ISO8601_timestamp}#{message_id}` | S | |
+| `sender_id` | S | |
+| `content` | S | |
+
+Kept as a distinct table from the chat `Messages` table
+([05-domain-model.md](05-domain-model.md) §3 — same doc) to avoid
+conflating user-to-bot chat history with user-to-user messaging; they
+have different access patterns, retention needs (NFR-094), and
+moderation requirements (FR-123).
+
+### `ModerationReports`
+| Attribute | Type | Notes |
+|---|---|---|
+| `PK` = `REPORT#{report_id}` | S | |
+| `subject_type` | S | `post` \| `comment` \| `message` |
+| `subject_id` | S | |
+| `reporter_id` | S | |
+| `reason` | S | |
+| `status` | S | `open` \| `reviewed` \| `actioned` |
+| `created_at` | S | |
+
+Exact review workflow (who reviews, SLA) is open per
+[00-vision-and-scope.md](00-vision-and-scope.md) §8 Q10 — this table
+supports the report action (FR-123) regardless of how that workflow ends
+up defined.
+
 ## 4. Cross-Store Consistency Notes
 
 - `document_id` is the only value shared between Postgres (`chunks.
@@ -152,12 +278,25 @@ NFR-033.
   its existing chunks (a targeted UPDATE, not a full re-embed) — captured
   as a requirement in [06-ingestion-spec.md](06-ingestion-spec.md).
 
-## 5. Open Item
+## 5. Open Items
 
-Access-control source of truth (Cognito groups vs. a separate
-entitlement system) is still unconfirmed (see
-[00-vision-and-scope.md](00-vision-and-scope.md) §8). This model assumes
-Cognito group membership maps directly to `access_tags` values; if a
-separate HRIS/entitlement source is confirmed instead, only the
-tag-population step in ingestion/ACL-sync changes — the schema above is
-unaffected.
+- **Resolved v0.3**: access-control source of truth is confirmed as
+  Cognito user-pool groups (see
+  [00-vision-and-scope.md](00-vision-and-scope.md) §8 Q2). `access_tags`
+  population as described in this document stands as final for v1, not
+  a default pending confirmation — may be revisited if Cognito groups
+  prove too coarse later, per Q2's resolution note.
+- **Resolved v0.3**: `Follows`/`Feed` (§3.1) org-wide feed visibility
+  (FR-126's default) is confirmed, not provisional (see
+  [00-vision-and-scope.md](00-vision-and-scope.md) §8 Q10). If a
+  narrower visibility model is adopted later, the `Feed` fan-out
+  trigger's follower-resolution logic changes, but the table schema
+  itself does not.
+- **Resolved v0.3 for build purposes**: family/dependent data now has a
+  schema — see the `EmployeeRecord.family_members[]` note above — but
+  only as **synthetic data in the Placeholder People-Data Service**, a
+  different service's schema, not PolicyBot's own. No schema for real
+  family/dependent data exists anywhere in this document, and none
+  should be added without first resolving the Legal/Compliance question
+  in [00-vision-and-scope.md](00-vision-and-scope.md) §8 Q9 (still open
+  — mocking the data did not resolve it, see BR-10).

@@ -1,9 +1,12 @@
 # 01 — Business Requirements
 
 ## Status
-Draft v0.2 — 2026-08-21 (revised for the v0.2 scope expansion in
+Draft v0.3 — 2026-08-21 (v0.2: scope expansion in
 [00-vision-and-scope.md](00-vision-and-scope.md) — employee/org data and
-an internal social layer)
+an internal social layer. v0.3: Q2/Q7/Q9/Q10 resolutions — Cognito
+groups confirmed, placeholder People-Data Service replaces "real HRIS"
+assumption, family data mocked for build only, social moderation
+defaults to report-only)
 
 Traces from: [00-vision-and-scope.md](00-vision-and-scope.md)
 
@@ -41,14 +44,16 @@ In scope:
 - Slide decks (e.g. town hall decks) — text + embedded images
 - Training/town-hall videos (audio transcript + visual keyframes)
 - Scanned/image-based policy pages (requires OCR)
-- **Employee/org data, read-only, via live MCP tool calls to the HRIS/
-  People system of record** (revised from v0.1, which excluded this
-  category entirely): role, manager, department, org hierarchy, training
-  status, certification records, and performance/360 review feedback
-  (review data gated per BR-09). Not ingested/indexed like documents —
-  queried live, so the HRIS remains sole system of record and there is no
-  staleness/re-sync problem to manage (see
-  [00-vision-and-scope.md](00-vision-and-scope.md) §6).
+- **Employee/org data, read-only, via live MCP tool calls to the
+  People-data source of record** (revised from v0.1, which excluded this
+  category entirely; source is a placeholder service we build for v1,
+  not a real HRIS — see [00-vision-and-scope.md](00-vision-and-scope.md)
+  §7/§8 Q7): role, manager, department, org hierarchy, training status,
+  certification records, performance/360 review feedback (gated per
+  BR-09), salary/compensation data (gated per BR-13), and mocked
+  family/dependent fields (BR-10, build-only). Not ingested/indexed like
+  documents — queried live, so no staleness/re-sync problem, regardless
+  of whether the source is today's placeholder or a future real HRIS.
 - **Internal employee social content**: profiles, a shared feed, posts,
   comments, and direct messages between employees — full social
   interaction, not a directory-only subset — natively created and stored
@@ -59,11 +64,11 @@ Out of scope (v1):
 - **Modifying** any HRIS/LMS/performance-management system-of-record data
   — all employee/org/training/review data is read-only through the bot;
   edits happen only in the source system.
-- Family/dependent information — explicitly **not** in scope until
-  [00-vision-and-scope.md](00-vision-and-scope.md) §8 open question 9
-  (legal basis, exact field set) is resolved with Legal/Compliance
-  sign-off. Listed as a directional goal, not a buildable requirement,
-  until then.
+- **Real** family/dependent information — buildable now only against
+  mocked/synthetic data (see the in-scope bullet above and BR-10); real
+  employee family/dependent data stays out of scope until
+  [00-vision-and-scope.md](00-vision-and-scope.md) §8 open question 9's
+  legal-basis question is resolved with actual Legal/Compliance sign-off.
 - Legally binding contracts requiring signature workflows.
 - Real-time/ephemeral Slack or email content.
 
@@ -79,10 +84,11 @@ Out of scope (v1):
 | BR-06 | All conversations are logged for audit and quality-evaluation purposes, subject to the company's data retention policy. |
 | BR-07 | Users can see and manage (rename/delete) their own chat sessions; users cannot see other users' chat sessions. |
 | BR-08 | The system must degrade gracefully if the LLM provider (OpenAI) is unavailable or rate-limited (clear error, retry/backoff, no silent failure). |
-| BR-09 | Performance/360 review feedback about an employee is only visible, via the bot, to that employee themselves, their direct management chain, and HR — never to an arbitrary employee querying about a peer. Enforcement must happen at query time (mirroring BR-04's document-ACL rigor for FR-004/FR-064), not as an app-level convention that a prompt could be talked around. |
-| BR-10 | Family/dependent information is not exposed via the bot in any form until Legal/Compliance sign-off exists for a specific field set and legal basis (see [00-vision-and-scope.md](00-vision-and-scope.md) §8 Q9). This is a hard gate, not a default-open item like BR-04's ACL defaults. |
+| BR-09 | Performance/360 review feedback about an employee is only visible, via the bot, to that employee themselves, their **immediate manager** (not the full reporting chain — a skip-level manager has no more access than any other employee), and HR — never to an arbitrary employee querying about a peer. Enforcement must happen at query time (mirroring BR-04's document-ACL rigor for FR-004/FR-064), not as an app-level convention that a prompt could be talked around. **Resolved 2026-08-21** — see [00-vision-and-scope.md](00-vision-and-scope.md) §8 Q8, §10. |
+| BR-10 | Family/dependent information: **buildable now against mocked/synthetic data only** (v1 has no real HRIS integration — see [00-vision-and-scope.md](00-vision-and-scope.md) §7/§8 Q7/Q9), but real employee family/dependent data must not be exposed via the bot in any form until Legal/Compliance sign-off exists for a specific field set and legal basis. Mocking the data resolves the *build* blocker only — it does not resolve, and must not be read as resolving, the legal question. This is a hard gate on real data, not a default-open item like BR-04's ACL defaults. |
 | BR-11 | Social content (posts, comments, direct messages) is user-generated, subject to moderation, and logged/retained under the same audit discipline as chat content (BR-06) — a DM is not exempt from the retention/audit posture just because it isn't a policy Q&A. |
 | BR-12 | The bot must not fabricate or infer org/people data (a manager, a team assignment) when the live HRIS lookup fails or returns nothing — same "say it doesn't know" posture as BR-03, applied to people data, not just documents. |
+| BR-13 | Salary/compensation data (current salary, hike/increase history) about an employee is only visible, via the bot, to that employee themselves, their immediate manager, and HR — same entitlement model and same query-time enforcement posture as BR-09, never to an arbitrary employee. A denial must not itself leak information (e.g. the refusal must read identically whether or not the subject actually received a hike) — see [00-vision-and-scope.md](00-vision-and-scope.md) §10 Scenario C. |
 
 ## 5. Success Criteria (business-level acceptance)
 
@@ -91,16 +97,20 @@ Out of scope (v1):
   answered correctly and with correct citations.
 - Security/Compliance signs off on the access-control model and guardrail
   test results (see [11-security-spec.md](11-security-spec.md)) —
-  **explicitly including** the performance-review access model (BR-09)
-  and the family-data gate (BR-10) as separate sign-off line items, not
-  folded into general document-ACL sign-off.
+  **explicitly including** the performance-review access model (BR-09),
+  the salary/compensation access model (BR-13), and the family-data gate
+  (BR-10) as separate sign-off line items, not folded into general
+  document-ACL sign-off.
 - The system passes a staging soak test and is deployed to prod via the
   CI/CD pipeline with no manual steps (see
   [14-infra-and-cicd-spec.md](14-infra-and-cicd-spec.md)).
-- Social-feature success criteria (adoption/engagement targets) are
-  deferred pending [00-vision-and-scope.md](00-vision-and-scope.md) §8
-  open question 10 (moderation/retention scope) — not defined yet because
-  the feature boundary itself isn't fully defined.
+- Social-feature adoption/engagement numeric targets are still deferred
+  (no baseline usage data exists yet to set them against) — but the
+  feature boundary itself is no longer undefined:
+  [00-vision-and-scope.md](00-vision-and-scope.md) §8 open question 10
+  resolved to a minimal report-only moderation default and org-wide feed
+  visibility, so this is a "no target number yet" gap, not a "scope
+  undefined" gap.
 
 ## 6. Assumptions Requiring Business Sign-off
 
@@ -114,12 +124,16 @@ Out of scope (v1):
    reflected in system prompt behavior and UI disclaimers.
 4. Retention period for chat logs will follow the company's existing data
    retention policy (default assumption: 12 months, unless corrected).
-5. **New**: employee/org data (role, manager, hierarchy, training,
-   certifications, reviews) already exists and is governed in an HRIS/
-   People system today — PolicyBot is a read surface onto it, not the
-   first place it's collected or the system that decides retention for
-   it. **Requires confirmation** — see
-   [00-vision-and-scope.md](00-vision-and-scope.md) §8 Q7.
-6. **New**: family/dependent data has no assumption at all pending Legal/
-   Compliance sign-off (BR-10) — this is intentionally not listed as an
-   assumption to confirm, because no default is being built against.
+5. **Revised, resolved 2026-08-21**: for v1, employee/org data (role,
+   manager, hierarchy, training, certifications, reviews, salary) is
+   **not** sourced from a real HRIS — it's served by a placeholder
+   People-Data Service this team builds and seeds with mock data (see
+   [00-vision-and-scope.md](00-vision-and-scope.md) §7/§8 Q7). PolicyBot
+   is therefore, for now, the de facto system of record for this mock
+   data, not a read-surface onto something else. A real HRIS integration
+   is future work, deferred to when a vendor is actually selected.
+6. **Revised, resolved 2026-08-21**: family/dependent data may be
+   **mocked** for build/demo purposes under assumption 5 above — this
+   unblocks development but is explicitly not a substitute for
+   Legal/Compliance sign-off (BR-10), which remains required before any
+   *real* employee family/dependent data is ever connected.

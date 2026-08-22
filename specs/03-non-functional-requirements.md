@@ -1,7 +1,10 @@
 # 03 — Non-Functional Requirements
 
 ## Status
-Draft v0.1 — 2026-08-17
+Draft v0.3 — 2026-08-21 (v0.2 added NFR Group J for the people-data/
+social scope expansion; v0.3 resolves that group's open questions —
+immediate-manager-only entitlement confirmed, real-vs-mock family data
+distinction made explicit in NFR-095)
 
 Traces from: [00-vision-and-scope.md](00-vision-and-scope.md),
 [02-functional-requirements.md](02-functional-requirements.md)
@@ -124,3 +127,47 @@ Traces from: [00-vision-and-scope.md](00-vision-and-scope.md),
 - **NFR-084**: These thresholds SHALL be enforced as CI quality gates —
   a build that regresses below threshold fails the pipeline (see
   [12-evaluation-spec.md](12-evaluation-spec.md)).
+
+## NFR Group J — People Data & Social Privacy/Safety
+
+Added in v0.2, tracing to
+[00-vision-and-scope.md](00-vision-and-scope.md) G6/G7 and
+[01-business-requirements.md](01-business-requirements.md) BR-09–BR-12.
+
+- **NFR-090**: Performance/360 review data (FR-114) and salary/
+  compensation data (FR-118) SHALL be enforced with the same or higher
+  access-control rigor as manager-only documents (NFR-030–034 baseline),
+  scoped to self + **immediate manager only** + HR, with the check
+  happening at MCP-tool-call time, not solely via system-prompt
+  instruction. A denied request SHALL return an identical refusal
+  regardless of the underlying data, so a denial itself cannot be used
+  to infer the data's content (see
+  [00-vision-and-scope.md](00-vision-and-scope.md) §10 Scenario C).
+- **NFR-091**: Every MCP tool call against the HRIS/People system SHALL
+  be logged to the immutable audit log (actor, employee record accessed,
+  tool, timestamp) — extends NFR-033's audit scope from document/ACL
+  actions to people-data reads, which is a new and more sensitive
+  category of access to have visibility into.
+- **NFR-092**: MCP tool calls against the HRIS/People system SHALL be
+  rate-limited and short-TTL cached at the integration layer, so that
+  chat-driven query volume cannot degrade or overload a system that
+  wasn't designed to serve as an LLM-agent backend.
+- **NFR-093**: User-generated social content (posts, comments, direct
+  messages) SHALL pass through the same content-safety screening used for
+  generated chat output (per FR-081's guardrail pattern) before being
+  visible to other users — this is a distinct control from FR-081 itself
+  (screening *user* content, not *model* output) but reuses the same
+  guardrail infrastructure rather than a separate pipeline.
+- **NFR-094**: Social content retention/deletion SHALL follow the same
+  policy discipline as chat logs (NFR-042) — exact retention period for
+  social content specifically is open pending
+  [00-vision-and-scope.md](00-vision-and-scope.md) §8 Q10.
+- **NFR-095**: **Real** employee family/dependent data SHALL NOT be
+  requested, stored, cached, or logged by the system in any form, in any
+  component — a technical control mirroring BR-10. **Synthetic/mocked**
+  family/dependent data (v1's placeholder People-Data Service, per
+  [00-vision-and-scope.md](00-vision-and-scope.md) §8 Q7/Q9) is exempt
+  from this control for build/demo purposes, but any record fetched from
+  a real HRIS integration in the future MUST be treated as real data
+  under this NFR from the moment that integration exists — there is no
+  grace period implied by the fact that a mocked version predates it.

@@ -1,16 +1,22 @@
 # 00 — Vision and Scope
 
 ## Status
-Draft v0.2 — 2026-08-21
+Draft v0.3 — 2026-08-21
 
-**Revision note (v0.2)**: expanded scope to include live employee/org
-data (via MCP tools) and an internal employee social layer. This
-reverses the v0.1 Non-Goal that excluded HRIS/employee-record data and
-the "read-only" framing. See §8 for what's still genuinely unresolved,
-and the ripple note at the end of this doc's history — specs
-[02](02-functional-requirements.md)–[05](05-domain-model.md) and
-[08](08-generation-spec.md) were written against v0.1 scope and need a
-follow-up revision pass to match.
+**Revision history**:
+- **v0.2**: expanded scope to include live employee/org data (via MCP
+  tools) and an internal employee social layer. Reversed the v0.1
+  Non-Goal that excluded HRIS/employee-record data and the "read-only"
+  framing.
+- **v0.3**: resolved the four open questions the v0.2 expansion raised
+  (§8 Q2, Q7, Q9, Q10) — Cognito groups confirmed as ACL source of
+  truth, a placeholder People-Data Service (our own, on ECS) stands in
+  for a real HRIS, family/dependent data is mocked for build purposes
+  only (real data still legally gated), and social moderation ships a
+  minimal report-only default. Specs
+  [02](02-functional-requirements.md)–[05](05-domain-model.md) and
+  [08](08-generation-spec.md) are updated to match; `11`+ can now be
+  written against settled ground.
 
 ## 1. Problem Statement
 
@@ -50,7 +56,11 @@ each other directly from the same product.
   continuously against a golden dataset, cost-tracked.
 - G6: Employees can ask people/org questions ("who is X's manager", "what
   team is X on", "show me the org chart under Y") and get accurate answers
-  sourced live from the system-of-record, not a stale copy.
+  sourced live from the system-of-record, not a stale copy. Includes
+  self-service questions about one's own sensitive data ("what was my
+  salary hike this year", "what did my 360 feedback say") — answered for
+  the employee themselves, their immediate manager, or HR, and refused
+  for anyone else (see §10 for a concrete walkthrough).
 - G7: Employees can build colleague profiles, post and comment in a
   shared internal feed, and message each other directly — a full
   internal social experience, not a stripped-down directory add-on —
@@ -151,10 +161,12 @@ each other directly from the same product.
 - **Evaluation**: golden dataset + LangSmith eval pipeline, run in CI as a
   quality gate.
 - **Security**: authN/Z (SSO/OIDC), document-level ACLs, role-based
-  people-data access (esp. performance/360 review data — self + manager
-  chain + HR only, never arbitrary employee-to-employee), prompt-injection
-  and hallucination guardrails, PII handling — now with materially higher
-  stakes given family/dependent and performance data in scope.
+  people-data access (performance/360 review data **and** salary/
+  compensation data — self + immediate manager + HR only, never arbitrary
+  employee-to-employee, and never the full reporting chain), prompt-
+  injection and hallucination guardrails, PII handling — now with
+  materially higher stakes given family/dependent and compensation data
+  in scope.
 - **Observability**: New Relic APM + custom RAG metrics/dashboards/alerts.
 - **Delivery**: CI/CD pipeline to AWS, environment-promoted (dev → staging →
   prod), infra as code.
@@ -173,26 +185,37 @@ each other directly from the same product.
 - Operational (non-vector) data store is DynamoDB.
 - Launch corpus: ~1,000 documents (≤10 pages each), 10 videos; design
   ceiling ~1000x that for future growth.
-- Employee/org data is assumed to already exist in a company HRIS/People
-  system today (family/dependent info, training, certifications, and
-  360/performance reviews are typically HRIS- or LMS-native features) —
-  PolicyBot is assumed to be a *read surface* onto that existing system,
-  not the first place this data is collected. **This assumption needs
-  confirmation** (see §8 Q9) — if any of this data is not already
-  collected and governed elsewhere, surfacing it here would make PolicyBot
-  the system of record, which is a materially different (and much
-  heavier) compliance posture.
+- **Revised 2026-08-21 (resolves Q7)**: v1 does **not** integrate a real
+  external HRIS/People system yet. Instead, a **placeholder People-Data
+  Service** — owned and built by this team, deployed in our own ECS
+  cluster — stands in for it, seeded with synthetic/mock org data (role,
+  manager, hierarchy, training, certifications, reviews, salary, and
+  mocked family/dependent fields per Q9 below). The MCP Tool Layer
+  ([04-architecture.md](04-architecture.md) §2.10) talks to this
+  placeholder through the same interface a real HRIS integration would
+  use, so swapping in an actual vendor system (Workday, SuccessFactors,
+  etc.) later is a backend swap behind a stable interface, not a
+  redesign — the same posture as ADR-004's OpenAI/Ollama abstraction.
+  **This means PolicyBot is, for now, actually the system that holds this
+  mock data** — it is not yet a pure read-surface onto something else,
+  which is the opposite of the v0.1/early-v0.2 assumption. That's fine
+  for build/demo purposes; it's exactly why Q9's family-data resolution
+  below is scoped to mock data only, not real employee data.
 
 ## 8. Open Questions
 
 Resolved 2026-08-17:
 
 1. **SSO/IdP**: Amazon Cognito.
-2. **Access restrictions / source of truth**: still open — no answer yet.
-   Default assumption until answered: Cognito user-pool groups are the
-   source of truth for role/department entitlements, mapped 1:1 to
-   document ACL tags. **Must be confirmed before
-   [11-security-spec.md](11-security-spec.md) is finalized.**
+2. **Access restrictions / source of truth — RESOLVED 2026-08-21**:
+   Cognito user-pool groups are the confirmed source of truth for
+   role/department entitlements, mapped 1:1 to document ACL tags.
+   Explicitly acknowledged as a v1 decision that may be upgraded to a
+   dedicated entitlement system later if Cognito groups prove too coarse
+   (e.g. for the immediate-manager-specific checks in Q8) — that upgrade
+   would change only how `access_tags`/manager relationships are
+   populated, not the ACL enforcement pattern itself (query/tool-level
+   filtering, per FR-064/FR-114/FR-118).
 3. **Corpus size**: launch with ~1,000 documents (≤10 pages each, so
    ≤10,000 pages) and 10 videos. Plan for up to ~1000x growth over time
    (target design ceiling: ~1M documents / ~10M pages, thousands of
@@ -223,57 +246,117 @@ Resolved 2026-08-17:
    (see [08-generation-spec.md](08-generation-spec.md)) so this can be
    swapped in later without a redesign; **OpenAI is the provider for v1**.
 
-Opened 2026-08-21 (v0.2 scope expansion — none of these are resolved yet;
-listed in rough order of how much they block downstream specs):
+Opened 2026-08-21 (v0.2 scope expansion), resolved same day:
 
-7. **HRIS/People system identity**: which system is the source of truth
-   for role, manager, department, org hierarchy, training,
-   certifications, and performance/360 review data (e.g. Workday,
-   SuccessFactors, BambooHR, a custom internal system)? This determines
-   what the MCP tool integration in §6 actually connects to and what its
-   auth/rate-limit constraints are. **Blocks**: the MCP-tools architecture
-   component and its domain model.
-8. **Performance/360 review access model**: default assumption pending
-   confirmation — visible only to (a) the employee themselves, (b) their
-   direct management chain, (c) HR — never to an arbitrary employee
-   asking about a peer. **Must be confirmed before this is built** — this
-   is the most sensitive data category in scope and the access-control
-   design (query-time enforcement, not app-level trust) needs to mirror
-   the document-ACL rigor already established for FR-004/FR-064, not be
-   weaker than it.
-9. **Family/dependent information — compliance basis, unresolved,
-   flagging rather than assuming**: what specific fields are meant
-   (dependents' names, emergency contacts, something else?), and under
-   what legal basis can this be surfaced through a chatbot rather than
-   only the system it already lives in? This is qualitatively more
-   sensitive than the rest of the people-data scope and several
-   jurisdictions treat family/dependent data as a distinct, more
-   restricted category of PII. **No default assumption is made here** —
-   unlike open question 2 above, this is not the kind of gap where a
-   reasonable placeholder is safe to build against. **Must have explicit
-   Legal/Compliance sign-off before any FR referencing this is written**,
-   let alone implemented. Until resolved, treat family/dependent data as
-   out of scope in practice even though G6/§6 lists it directionally.
-10. **Social feature moderation and feed mechanics**: G7/§6 confirm the
-    feature set (profiles, feed, posts, comments, DMs) is in scope in
-    full, not a stripped-down subset — what's still undecided is
-    moderation policy (reporting/blocking, content review, prohibited
-    content), feed visibility/ranking rules (who sees whose posts —
-    org-wide, department-scoped, or follow-based), retention period for
-    social content, and whether it's subject to the same audit-log
-    discipline as chat (BR-06). **Blocks**: the social-layer domain model
-    and any FR/NFR numbering for it.
+7. **HRIS/People system identity — RESOLVED 2026-08-21**: no real vendor
+   system for v1. A **placeholder People-Data Service** (our own,
+   deployed on ECS) stands in, seeded with mock/synthetic data covering
+   every category in this open question — see §7's revised assumption
+   above and [04-architecture.md](04-architecture.md) §2.12 for the
+   component. Real-vendor integration (Workday/SuccessFactors/etc.) is
+   deferred to a future ADR when there's an actual system to integrate
+   with; the MCP tool interface is written so that swap doesn't ripple
+   into the generation graph or FR/NFR text (FR Group L already treats
+   "the HRIS/People system" generically for exactly this reason).
+8. **Performance/360 review AND salary/compensation access model —
+   RESOLVED 2026-08-21**: visible only to (a) the employee themselves,
+   (b) their **immediate manager only** (not the full reporting chain —
+   a skip-level manager has no more access than any other employee), and
+   (c) HR — never to an arbitrary employee asking about a peer. This now
+   covers salary/compensation data (current salary, hike/increase
+   history) as well as performance/360 review data — same rule, same
+   enforcement posture (query-time/tool-level enforcement, mirroring the
+   document-ACL rigor already established for FR-004/FR-064, not weaker
+   than it). See §10 for a concrete walkthrough. Implemented as
+   FR-114/FR-118 in [02-functional-requirements.md](02-functional-requirements.md),
+   BR-09/BR-13 in [01-business-requirements.md](01-business-requirements.md).
+9. **Family/dependent information — RESOLVED for build purposes
+   2026-08-21, legal question itself still open**: two separate
+   questions were being conflated here, and only one is resolved.
+   - *Can we build/demo the feature now?* Yes — the placeholder
+     People-Data Service (Q7) seeds **synthetic, fabricated**
+     family/dependent fields (no real employee data exists anywhere in
+     this system yet), so FR-116's tool can be built and tested against
+     mock records.
+   - *Can we expose real employee family/dependent data in production?*
+     **Still no, and still unresolved** — the underlying legal-basis
+     question (what fields, under what jurisdictioned legal basis) has
+     not been answered, only deferred by the fact that v1 has no real
+     data source to expose in the first place. This distinction matters
+     enough to restate: **do not treat "we mocked it" as "legal signed
+     off on it."** When a real HRIS (Q7) is eventually integrated, the
+     family-data legal question must be answered *before* that field is
+     connected — mocking now does not grandfather it in later.
+10. **Social feature moderation and feed mechanics — RESOLVED (lightweight
+    default) 2026-08-21**: rather than block on a full moderation
+    program, v1 ships a minimal default: **report-only moderation** (a
+    user can report a post/comment/message per FR-123; reports queue in
+    `ModerationReports` for manual HR/admin review — no automated
+    content moderation beyond the shared guardrail content-safety
+    screening already required by NFR-093) and **org-wide feed
+    visibility** (FR-126's existing default — no department-scoping or
+    follow-based visibility restriction in v1). Explicitly treated as an
+    intentionally open/minimal starting point, not a fully-designed
+    moderation program — revisit if usage patterns show it's
+    insufficient (e.g. abuse volume, review SLA complaints).
 11. **Ripple into already-written specs**: [02](02-functional-requirements.md)–
-    [05](05-domain-model.md) currently reflect v0.1 scope (e.g. `01`
-    §3 previously listed HRIS data as explicitly out of scope; `08`
-    §8 previously deferred tool-calling to v2). These need a revision
-    pass once Q7–Q10 above are resolved enough to write concrete
-    requirements against, rather than before — writing FR/NFR/
-    architecture content ahead of Q7–Q9 in particular would mean
-    designing against a system and a legal basis that don't exist yet.
+    [05](05-domain-model.md) and [08](08-generation-spec.md) have been
+    revised to match the v0.2 scope expansion and the Q2/Q7/Q9/Q10
+    resolutions above — see each doc's Status header for its revision
+    note. `11-security-spec.md` onward are not yet written; they can now
+    be written against the placeholder People-Data Service and Cognito
+    groups as settled ground rather than open questions.
 
 ## 9. Spec Index
 
 See `/specs` directory for the full spec set; this document is the anchor.
 Each functional requirement below traces to later specs via requirement
 IDs (`FR-xxx`, `NFR-xxx`).
+
+## 10. Example Use Case: Sensitive Self-Service People-Data Query
+
+Grounds open question 8's now-resolved entitlement rule in a concrete
+walkthrough, since "self + immediate manager + HR only" is easy to state
+abstractly and easy to get wrong in enforcement.
+
+**Scenario A — asking about yourself (allowed):**
+1. Employee logs in via corporate SSO (FR-001); session resolves their
+   identity and role (FR-003).
+2. Employee asks: *"What was my salary hike this year?"* or *"What did my
+   360 feedback say?"*
+3. `query_rewrite` (per [08-generation-spec.md](08-generation-spec.md))
+   passes the query to `generate`, which calls the salary/review MCP
+   tool (FR-117/FR-113) with the requesting user's own identity as the
+   subject.
+4. The MCP Tool Layer's entitlement check (FR-118/FR-114) evaluates:
+   requesting user == subject employee → **allowed**. Data returned,
+   answer generated, logged to `AuditLog` (NFR-091).
+
+**Scenario B — a manager asking about their direct report (allowed):**
+1. Manager asks: *"What was Priya's salary hike this year?"*
+2. Same tool call, subject = Priya.
+3. Entitlement check: requesting user == Priya's **immediate** manager →
+   **allowed**.
+
+**Scenario C — a peer, or a skip-level manager, asking about someone else
+(refused):**
+1. Employee (or Priya's manager's own manager — skip-level) asks: *"What
+   was Priya's salary hike this year?"*
+2. Same tool call, subject = Priya.
+3. Entitlement check: requesting user is neither Priya, Priya's immediate
+   manager, nor HR → **refused**. Per FR-115/BR-12, the bot states it
+   doesn't have permission to share that rather than confirming or
+   denying details that could themselves leak information (e.g. it
+   should not say "Priya didn't get a hike" vs. staying silent in a way
+   that implies she did — the refusal message is the same regardless of
+   what the underlying data actually is, so the response itself carries
+   no signal).
+4. Logged to `AuditLog` as a denied access attempt (NFR-091) — a pattern
+   of repeated denied attempts against the same subject is a security
+   signal worth alerting on (see
+   [13-observability-spec.md](13-observability-spec.md), not yet
+   written).
+
+This is the same query-time enforcement pattern already used for
+document ACLs (FR-064) — the difference is only which layer owns the
+check (retrieval query vs. MCP tool), not the underlying discipline.

@@ -1,7 +1,13 @@
 # 08 — Generation / Orchestration Spec
 
 ## Status
-Draft v0.1 — 2026-08-18
+Draft v0.4 — 2026-08-22 (v0.2: §8 revised — tool-calling is no longer a
+deferred v2 placeholder, the MCP org/people-data tools are the concrete
+v1 implementation. v0.3: tools now call the Placeholder People-Data
+Service, §8 including the mocked family-data tool. v0.4: §2/§3 revised
+to match [11-security-spec.md](11-security-spec.md)'s call-count
+optimization — `query_rewrite` now also returns `injection_score`
+instead of a separate dedicated classifier call)
 
 Traces from: [02-functional-requirements.md](02-functional-requirements.md)
 (FR Groups B, D, H, plus FR-080–083), [03-non-functional-requirements.md](03-non-functional-requirements.md)
@@ -27,8 +33,15 @@ hit is detected.
 
 ```
 user_message
-  → input_guardrail        (FR-080) ── injection detected → block, log, END
-  → query_rewrite           (FR-013) ── uses session history
+  → input_guardrail        (FR-080, heuristic-only, no LLM call —
+                             see 11-security-spec §3) ── pattern match
+                             → block, log, END
+  → query_rewrite           (FR-013, uses session history — ALSO returns
+                             injection_score in the same call, per
+                             11-security-spec §3's call-count optimization)
+                                  ├─ injection_score above threshold
+                                  │      → discard rewrite, block, log, END
+                                  └─ below threshold → continue
   → memory_lookup           (FR-032) ── parallel with retrieve; non-blocking
   → retrieve                 (calls 07-retrieval-spec interface)
   → relevance_grade          (FR-071)
@@ -42,7 +55,9 @@ user_message
                                                    generate          (FR-010, FR-011, FR-014, FR-032)
                                                        │
                                                        ▼
-                                             output_guardrail        (FR-081, FR-082, FR-083)
+                                             output_guardrail        (FR-081, FR-082, FR-083 —
+                                                                       two calls/increment, not
+                                                                       four; see 11-security-spec §4)
                                                        │
                                                        ▼
                                              stream_to_client
@@ -55,14 +70,14 @@ user_message
 
 | Node | Responsibility | Notes |
 |---|---|---|
-| `input_guardrail` | Screen the raw user message for prompt-injection patterns before anything else runs (FR-080) | Detection logic: [11-security-spec.md](11-security-spec.md). On hit: log event, return a fixed refusal, do not proceed (FR-082) |
-| `query_rewrite` | Given current message + session history, produce a standalone query string (FR-013) | Small/fast model — structured rewrite task, not answer quality; on retry (see §5), receives the prior insufficient query + a hint of what was missing |
+| `input_guardrail` | Heuristic (pattern/regex) screen for prompt-injection markers before anything else runs (FR-080) | **Not an LLM call** — the LLM-based classifier signal that used to run here as a separate pass is now folded into `query_rewrite`'s own call (see [11-security-spec.md](11-security-spec.md) §3). On a heuristic hit: log event, return a fixed refusal, do not proceed (FR-082) |
+| `query_rewrite` | Given current message + session history, produce a standalone query string (FR-013) — **and** return `injection_score` for the original message in the same structured call (FR-080, folded in per [11-security-spec.md](11-security-spec.md) §3) | Small/fast model — structured rewrite task, not answer quality; on retry (see §5), receives the prior insufficient query + a hint of what was missing. If `injection_score` comes back above threshold, the rewritten query is discarded and the turn blocks (FR-082) exactly as a heuristic hit would, just one call later |
 | `memory_lookup` | Query `LongTermMemory` (`PK = USER#{user_id}`) for entries relevant to the current query (FR-032) | Cheap keyword/recency lookup, not a full semantic search — memory is a small per-user set, doesn't need HNSW; runs in parallel with `retrieve`, joined before `relevance_grade` |
 | `retrieve` | Call [07-retrieval-spec.md](07-retrieval-spec.md) §2 interface with the rewritten query + `user_access_tags` | Single call per graph pass (or per retry pass) |
 | `relevance_grade` | Classify retrieved chunks as sufficient/insufficient to answer (FR-071) | Small/fast model, structured (sufficient \| insufficient + brief reason); reason feeds the retry's rewrite hint |
 | `not_enough_info` | Fixed-shape "I don't have enough information" response, no LLM call | Terminal node — satisfies FR-012/BR-03 without risking a model paraphrasing its way into a soft hallucination |
 | `generate` | Produce the answer from retrieved chunks (primary context) + memory context (secondary, lower-priority, FR-032) | Primary generation-quality model; streamed (§6); system prompt enforces BR-01 (grounded-only), FR-083 (never reveal system prompt/tools/retrieval internals) |
-| `output_guardrail` | Screen generated output for PII leakage, unsafe content, contradiction of sources (FR-081) before it reaches the client | Detection logic: [11-security-spec.md](11-security-spec.md); runs incrementally, not just once — see §6 |
+| `output_guardrail` | Screen generated output for PII leakage, unsafe content, groundedness, and system-prompt/tool-secrecy (FR-081, FR-083) before it reaches the client | Detection logic: [11-security-spec.md](11-security-spec.md) §4 — four checks, but only two LLM calls (groundedness+secrecy combined into one); runs incrementally, not just once — see §6 |
 | `stream_to_client` | Emit guardrail-cleared increments over SSE | — |
 
 ## 4. State Schema
@@ -75,6 +90,7 @@ LangGraph state object carried across nodes:
 | `conversation_history` | graph entry | recent turns from `Messages` (bounded window, not full history) |
 | `raw_query` | graph entry | verbatim user input |
 | `rewritten_query` | `query_rewrite` | overwritten on retry |
+| `injection_score` | `query_rewrite` | folded-in classifier signal, per [11-security-spec.md](11-security-spec.md) §3 — above-threshold discards `rewritten_query` and routes to block, not to `memory_lookup`/`retrieve` |
 | `memory_context` | `memory_lookup` | list of relevant `LongTermMemory` summaries, possibly empty |
 | `retrieved_chunks` | `retrieve` | from [07-retrieval-spec.md](07-retrieval-spec.md) output |
 | `relevance_verdict`, `relevance_reason` | `relevance_grade` | drives routing |
@@ -165,11 +181,32 @@ like a complete one on resume).
   in [04-architecture.md](04-architecture.md) §2.7 (OpenAI in v1,
   Ollama-ready) — no node calls the OpenAI SDK directly, so the future
   swap stays a DI/config change.
-- FR-072 (tool-calling extensibility): the graph is wired with
-  LangGraph's tool-calling support at the `generate` node, but **no
-  tools beyond document retrieval are registered in v1** — this is
-  documented as the v2 extension point, not built now. Adding a tool
-  later means registering it at this node, not restructuring the graph.
+- FR-072 (tool-calling): the graph is wired with LangGraph's tool-calling
+  support at the `generate` node. **Revised in v0.2** — this is no longer
+  an unused v2 extension point: the org/people-data lookups (FR-110–116)
+  are registered here as MCP tools, calling into the MCP Tool Layer
+  ([04-architecture.md](04-architecture.md) §2.10). `generate` decides
+  whether a tool call is needed (e.g. "who is X's manager") the same way
+  it decides how to phrase an answer — it is not a separate graph node,
+  since tool-calling here is the model choosing to invoke a function
+  mid-generation, not a retrieval-style pipeline stage.
+- The review-data and salary/compensation-data visibility checks
+  (FR-114/BR-09, FR-118/BR-13 — both scoped to self + immediate manager
+  only + HR) are enforced **inside the tool itself** (MCP Tool Layer, per
+  [04-architecture.md](04-architecture.md) §2.10), not by `generate`'s
+  system prompt — a prompt instruction telling the model "don't share
+  this data with unauthorized users" is not a security boundary (same
+  reasoning as document ACLs being enforced in the retrieval query, §
+  [07-retrieval-spec.md](07-retrieval-spec.md) §6, not as an
+  after-the-fact instruction). `generate` receives only what the tool is
+  willing to return for the requesting user.
+- A family/dependent-data tool **is** registered (resolved v0.3), but
+  only against the Placeholder People-Data Service's synthetic/mocked
+  fields — never real employee data (FR-116). `generate` calling this
+  tool today returns mock data only; the tool must be re-scoped (or
+  re-blocked) before any real HRIS is connected, since Q9's underlying
+  legal question remains unresolved (see
+  [00-vision-and-scope.md](00-vision-and-scope.md) §8 Q9).
 
 ## 9. Tracing (FR-073, FR-101)
 
@@ -197,6 +234,13 @@ like a complete one on resume).
 - Bounded conversation-history window size for `query_rewrite` (§4) is
   not yet specified — needs a concrete turn/token cap once typical
   session length data exists.
+- **New, v0.2**: MCP tool-call latency (§8) against the upstream HRIS/
+  People system isn't yet measured — if it's slow, a turn that triggers
+  a tool call could threaten the NFR-002 8s full-answer budget the same
+  way an unbounded retrieval retry would (§5). Needs a timeout/fallback
+  policy (e.g. tool call times out → same "I don't have that
+  information" path as FR-115) once real latency data exists, not
+  assumed away here.
 
 ---
 
@@ -208,6 +252,6 @@ like a complete one on resume).
 | §5 Bounded retry | FR-071 |
 | §6 Streaming/citations/cancel | FR-010, FR-011, FR-014, FR-015, FR-081 |
 | §7 Long-term memory | FR-030, FR-031, FR-032, FR-033 |
-| §8 Provider abstraction/tools | FR-072 |
+| §8 Provider abstraction/tools | FR-072, FR-110–118 |
 | §9 Tracing | FR-073, FR-101, NFR-040 |
 | (guardrail placement, detection deferred) | FR-080, FR-082, FR-083 |
